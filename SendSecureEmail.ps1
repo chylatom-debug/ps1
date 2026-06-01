@@ -1,4 +1,6 @@
-﻿# ==============================================================================
+﻿# W zasadzie nic się nie zmienia, dodaję żeby przetestować co i jak.
+
+# ==============================================================================
 # SendSecureEmail.ps1
 # Opis: Funkcje pomocnicze do wysyłki szyfrowanej poczty S/MIME
 #       z walidacją certyfikatów w AD (atrybut userCertificate).
