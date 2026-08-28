@@ -1,9 +1,17 @@
 # ============================================================
 # Konfiguracja
 # ============================================================
-$TxtPath   = "C:\temp\uzytkownicy.txt"
-$GroupOU   = "OU=Groups,DC=aaa,DC=pl"
-$TargetDC  = "aaadc01.aaa.pl"
+$TxtPath  = "C:\temp\uzytkownicy.txt"
+$GroupOU  = "OU=Groups,DC=aaa,DC=pl"
+$TargetDC = "aaadc01.aaa.pl"
+
+# ============================================================
+# Wyciąga domenę z DN, np. "DC=bbb,DC=pl" -> "bbb.pl"
+# ============================================================
+function Get-DomainFromDN {
+    param([string]$DN)
+    ($DN -replace '^.*?(?=DC=)', '') -replace 'DC=', '' -replace ',', '.'
+}
 
 # ============================================================
 # Import TXT
@@ -11,15 +19,28 @@ $TargetDC  = "aaadc01.aaa.pl"
 $users = Get-Content -Path $TxtPath -Encoding UTF8 | Where-Object { $_.Trim() -ne "" }
 
 foreach ($userDN in $users) {
-    $userDN = $userDN.Trim()
-
+    $userDN    = $userDN.Trim()
     $sam       = ($userDN -split ',')[0] -replace '^CN=', ''
     $groupName = "D-PA-$sam"
+    $userDomain = Get-DomainFromDN -DN $userDN
 
-    Write-Host "Przetwarzam: $sam" -ForegroundColor Cyan
+    Write-Host "Przetwarzam: $sam (domena: $userDomain)" -ForegroundColor Cyan
 
     # --------------------------------------------------------
-    # Utwórz grupę (jeśli nie istnieje)
+    # Pobierz obiekt użytkownika z JEGO domeny
+    # --------------------------------------------------------
+    try {
+        $userObject = Get-ADUser -Identity $userDN `
+                                 -Server $userDomain `
+                                 -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "  [BŁĄD] Nie można pobrać użytkownika '$userDN' z domeny '$userDomain': $_"
+        continue
+    }
+
+    # --------------------------------------------------------
+    # Utwórz grupę w aaa.pl (jeśli nie istnieje)
     # --------------------------------------------------------
     $existingGroup = Get-ADGroup -Filter "Name -eq '$groupName'" `
                                  -Server $TargetDC `
@@ -46,15 +67,15 @@ foreach ($userDN in $users) {
     }
 
     # --------------------------------------------------------
-    # Dodaj użytkownika do grupy
+    # Dodaj użytkownika — przekazujemy obiekt, nie DN
     # --------------------------------------------------------
     try {
         Add-ADGroupMember -Identity $groupName `
-                          -Members   $userDN `
+                          -Members   $userObject `
                           -Server    $TargetDC `
                           -ErrorAction Stop
 
-        Write-Host "  [OK] Dodano '$userDN' do grupy '$groupName'" -ForegroundColor Green
+        Write-Host "  [OK] Dodano '$sam' do grupy '$groupName'" -ForegroundColor Green
     }
     catch {
         Write-Warning "  [BŁĄD] Nie można dodać członka do '$groupName': $_"
