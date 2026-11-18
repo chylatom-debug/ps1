@@ -1,159 +1,84 @@
-#Requires -Version 5.1
-<#
-    Zarządzanie usługą "Zabbix Agent 2" i plikiem user_parameter2.conf na wielu serwerach.
-    1 - status usługi | 2 - restart usługi | 3 - info o pliku | 4 - kopiuj plik z lokalizacji
-    0 / exit - wyjście
-#>
+# Zabbix Agent 2 - zarządzanie na wielu serwerach (serwery sprawdzane po kolei)
 
-# ======================= KONFIGURACJA =======================
-$Servers        = @('SERWER01', 'SERWER02', 'SERWER03')
-$ServiceName    = 'Zabbix Agent 2'
-$RemoteConfPath = 'C:\Program Files\Zabbix Agent 2\user_parameter2.conf'   # ścieżka na serwerach
-$SourceFile     = '\\SHARE\zabbix\user_parameter2.conf'                    # źródło pliku (opcja 4)
-$Credential     = $null                   # opcjonalnie: Get-Credential
-# ============================================================
+# ===== KONFIGURACJA =====
+$Servers  = @('SERWER01', 'SERWER02', 'SERWER03')
+$Service  = 'Zabbix Agent 2'
+$ConfPath = 'C:\Program Files\Zabbix Agent 2\user_parameter2.conf'   # ścieżka na serwerach
+$Source   = '\\SHARE\zabbix\user_parameter2.conf'                    # skąd kopiować (opcja 4)
+# ========================
 
-function Invoke-OnServers {
-    # Uruchamia scriptblock na wszystkich serwerach; zwraca wyniki i listę serwerów z błędem.
-    param([scriptblock]$ScriptBlock, [object[]]$ArgumentList = @())
-    $p = @{ ComputerName = $Servers; ScriptBlock = $ScriptBlock; ArgumentList = $ArgumentList
-            ErrorAction = 'SilentlyContinue'; ErrorVariable = 'errs' }
-    if ($Credential) { $p.Credential = $Credential }
-    $raw = @(Invoke-Command @p)
-
-    $results = @{}
-    foreach ($i in $raw) { if ($i.PSComputerName) { $results[[string]$i.PSComputerName] = $i } }
-    $failed = @{}
-    foreach ($s in $Servers) {
-        if (-not $results.ContainsKey($s)) {
-            $msg = 'brak połączenia'
-            foreach ($e in $errs) { if ([string]$e.TargetObject -ieq $s) { $msg = $e.Exception.Message.Trim(); break } }
-            $failed[$s] = $msg
-        }
-    }
-    [pscustomobject]@{ Results = $results; Failed = $failed }
+function Write-Result($server, $ok, $text) {
+    Write-Host ("{0,-25}" -f $server) -NoNewline
+    if ($ok) { Write-Host 'OK     ' -ForegroundColor Green -NoNewline } else { Write-Host 'nie ok ' -NoNewline }
+    Write-Host $text
 }
 
-function Write-Result {
-    # "OK" na zielono, "nie ok" w domyślnym kolorze
-    param([string]$Server, [bool]$Ok, [string]$Details)
-    Write-Host ("{0,-25}" -f $Server) -NoNewline
-    if ($Ok) { Write-Host 'OK     ' -ForegroundColor Green -NoNewline } else { Write-Host 'nie ok ' -NoNewline }
-    Write-Host $Details
-}
-
-function Confirm-Action([string]$Text) {
-    (Read-Host "$Text (T/N)") -match '^(t|tak|y|yes)$'
-}
-
-function Show-Status {
-    $r = Invoke-OnServers -ArgumentList $ServiceName -ScriptBlock {
-        param($svc)
-        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
-        if (-not $s) { $s = Get-Service -DisplayName $svc -ErrorAction SilentlyContinue }
-        if ($s) { [pscustomobject]@{ Status = [string]$s.Status } }
-        else    { [pscustomobject]@{ Status = 'nie znaleziono usługi' } }
-    }
-    Write-Host ("`n{0,-25}{1,-7} {2}" -f 'SERWER', 'WYNIK', 'STATUS')
-    foreach ($s in ($Servers | Sort-Object)) {
-        if ($r.Failed.ContainsKey($s)) { Write-Result $s $false $r.Failed[$s] }
-        else { Write-Result $s ($r.Results[$s].Status -eq 'Running') $r.Results[$s].Status }
-    }
-}
-
-function Restart-Agents {
-    if (-not (Confirm-Action "Zrestartować '$ServiceName' na $($Servers.Count) serwerach?")) { return }
-    $r = Invoke-OnServers -ArgumentList $ServiceName -ScriptBlock {
-        param($svc)
-        try {
-            $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
-            if (-not $s) { $s = Get-Service -DisplayName $svc -ErrorAction Stop }
-            Restart-Service -InputObject $s -Force -ErrorAction Stop
-            $s.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
-            $s.Refresh()
-            [pscustomobject]@{ Ok = ($s.Status -eq 'Running'); Message = [string]$s.Status }
-        } catch {
-            [pscustomobject]@{ Ok = $false; Message = $_.Exception.Message }
-        }
-    }
-    Write-Host ''
-    $failed = @()
-    foreach ($s in ($Servers | Sort-Object)) {
-        if ($r.Failed.ContainsKey($s))       { Write-Result $s $false $r.Failed[$s];            $failed += $s }
-        elseif ($r.Results[$s].Ok)           { Write-Result $s $true  'restart zakończony'     }
-        else                                 { Write-Result $s $false $r.Results[$s].Message;   $failed += $s }
-    }
-    if ($failed) { Write-Host "`nRestart nie powiódł się na: $($failed -join ', ')" }
-    else         { Write-Host "`nRestart powiódł się na wszystkich stacjach." -ForegroundColor Green }
-}
-
-function Show-ConfInfo {
-    $r = Invoke-OnServers -ArgumentList $RemoteConfPath -ScriptBlock {
-        param($path)
-        if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $f = Get-Item -LiteralPath $path
-            [pscustomobject]@{ Rozmiar = $f.Length; DataModyfikacji = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
-                               SHA256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
-        } else {
-            [pscustomobject]@{ Rozmiar = '-'; DataModyfikacji = '-'; SHA256 = 'BRAK PLIKU' }
-        }
-    }
-    $out = foreach ($s in ($Servers | Sort-Object)) {
-        if ($r.Failed.ContainsKey($s)) {
-            [pscustomobject]@{ Serwer = $s; Rozmiar = '-'; DataModyfikacji = '-'; SHA256 = $r.Failed[$s] }
-        } else {
-            $x = $r.Results[$s]
-            [pscustomobject]@{ Serwer = $s; Rozmiar = $x.Rozmiar; DataModyfikacji = $x.DataModyfikacji; SHA256 = $x.SHA256 }
-        }
-    }
-    $out | Format-Table -AutoSize
-}
-
-function Copy-ToServers {
-    param([string]$LocalPath)
-    Write-Host ''
-    $failed = @()
-    foreach ($s in ($Servers | Sort-Object)) {
-        $sess = $null
-        try {
-            $sp = @{ ComputerName = $s; ErrorAction = 'Stop' }
-            if ($Credential) { $sp.Credential = $Credential }
-            $sess = New-PSSession @sp
-            Copy-Item -LiteralPath $LocalPath -Destination $RemoteConfPath -ToSession $sess -Force -ErrorAction Stop
-            Write-Result $s $true 'skopiowano'
-        } catch {
-            Write-Result $s $false $_.Exception.Message.Trim()
-            $failed += $s
-        } finally {
-            if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue }
-        }
-    }
-    if ($failed) { Write-Host "`nKopiowanie nie powiodło się na: $($failed -join ', ')" }
-    else         { Write-Host "`nPlik skopiowany na wszystkie stacje." -ForegroundColor Green }
-}
-
-function Copy-ConfFile {
-    if (-not (Test-Path -LiteralPath $SourceFile -PathType Leaf)) { Write-Host "Nie znaleziono pliku źródłowego: $SourceFile"; return }
-    if (-not (Confirm-Action "Skopiować $SourceFile -> $RemoteConfPath na $($Servers.Count) serwerów?")) { return }
-    Copy-ToServers -LocalPath $SourceFile
-}
-
-# ======================= MENU =======================
 do {
     Clear-Host
     Write-Host "=== Zabbix Agent 2 ($($Servers.Count) serwerów) ===" -ForegroundColor Cyan
     Write-Host '1 - status usługi'
     Write-Host '2 - restart usługi'
     Write-Host '3 - informacje o pliku (rozmiar, data, SHA256)'
-    Write-Host '4 - skopiuj nowy plik z lokalizacji'
+    Write-Host '4 - skopiuj nowy plik'
     Write-Host '0 / exit - zakończ'
     $choice = (Read-Host "`nWybierz opcję").Trim().ToLower()
+    Write-Host ''
+    $failed = @()
+
     switch ($choice) {
-        '1' { Show-Status;              Read-Host "`nEnter, aby wrócić do menu" | Out-Null }
-        '2' { Restart-Agents;           Read-Host "`nEnter, aby wrócić do menu" | Out-Null }
-        '3' { Show-ConfInfo;            Read-Host "`nEnter, aby wrócić do menu" | Out-Null }
-        '4' { Copy-ConfFile;            Read-Host "`nEnter, aby wrócić do menu" | Out-Null }
+        '1' {
+            foreach ($s in $Servers) {
+                try {
+                    $st = Invoke-Command -ComputerName $s -ErrorAction Stop -ArgumentList $Service -ScriptBlock {
+                        param($n) (Get-Service -Name $n -ErrorAction Stop).Status.ToString()
+                    }
+                    Write-Result $s ($st -eq 'Running') $st
+                } catch { Write-Result $s $false $_.Exception.Message }
+            }
+        }
+        '2' {
+            if ((Read-Host "Zrestartować '$Service' na wszystkich serwerach? (T/N)") -notmatch '^(t|tak)$') { break }
+            foreach ($s in $Servers) {
+                try {
+                    $st = Invoke-Command -ComputerName $s -ErrorAction Stop -ArgumentList $Service -ScriptBlock {
+                        param($n)
+                        Restart-Service -Name $n -Force -ErrorAction Stop
+                        (Get-Service -Name $n).Status.ToString()
+                    }
+                    Write-Result $s ($st -eq 'Running') $st
+                    if ($st -ne 'Running') { $failed += $s }
+                } catch { Write-Result $s $false $_.Exception.Message; $failed += $s }
+            }
+            if ($failed) { Write-Host "`nRestart nie powiódł się na: $($failed -join ', ')" }
+        }
+        '3' {
+            foreach ($s in $Servers) {
+                try {
+                    $info = Invoke-Command -ComputerName $s -ErrorAction Stop -ArgumentList $ConfPath -ScriptBlock {
+                        param($p)
+                        $f = Get-Item -LiteralPath $p -ErrorAction Stop
+                        '{0} B | {1} | {2}' -f $f.Length, $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'), (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
+                    }
+                    Write-Result $s $true $info
+                } catch { Write-Result $s $false $_.Exception.Message }
+            }
+        }
+        '4' {
+            if (-not (Test-Path -LiteralPath $Source)) { Write-Host "Nie znaleziono pliku źródłowego: $Source"; break }
+            if ((Read-Host "Skopiować $Source na wszystkie serwery? (T/N)") -notmatch '^(t|tak)$') { break }
+            foreach ($s in $Servers) {
+                try {
+                    $sess = New-PSSession -ComputerName $s -ErrorAction Stop
+                    Copy-Item -LiteralPath $Source -Destination $ConfPath -ToSession $sess -Force -ErrorAction Stop
+                    Write-Result $s $true 'skopiowano'
+                } catch { Write-Result $s $false $_.Exception.Message; $failed += $s }
+                finally { if ($sess) { Remove-PSSession $sess; $sess = $null } }
+            }
+            if ($failed) { Write-Host "`nKopiowanie nie powiodło się na: $($failed -join ', ')" }
+        }
         { $_ -in '0', 'exit' } { }
-        default { Write-Host 'Nieprawidłowy wybór.'; Start-Sleep -Seconds 1 }
+        default { Write-Host 'Nieprawidłowy wybór.' }
     }
+
+    if ($choice -notin '0', 'exit') { Read-Host "`nEnter, aby wrócić do menu" | Out-Null }
 } while ($choice -notin '0', 'exit')
